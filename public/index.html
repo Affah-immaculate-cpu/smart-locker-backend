@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Smart Locker System</title>
+    <style>
+        body { font-family: sans-serif; text-align: center; margin-top: 50px; }
+        button { padding: 15px 30px; font-size: 18px; margin: 10px; border: none; border-radius: 8px; cursor: pointer; }
+        #claimBtn { background-color: #4CAF50; color: white; }
+        #unlockBtn { background-color: #2196F3; color: white; }
+        #lockBtn { background-color: #FF9800; color: white; }
+        #releaseBtn { background-color: #f44336; color: white; }
+        .hidden { display: none; }
+        #status { font-weight: bold; margin-top: 20px; }
+    </style>
+</head>
+<body>
+    <h1>Smart Locker System</h1>
+    <p id="status">Click "Claim Locker" to get started.</p>
+
+    <div id="step1">
+        <button id="claimBtn">🔓 Claim a Locker</button>
+    </div>
+
+    <div id="step2" class="hidden">
+        <p>You have Locker <span id="lockerIdDisplay">-</span></p>
+        <button id="unlockBtn">Open Locker</button>
+        <button id="lockBtn">Close Locker</button>
+        <br><br>
+        <button id="releaseBtn">Return Locker (I'm done)</button>
+    </div>
+
+    <script>
+        const backendUrl = 'http://localhost:3000';
+        let currentUserId = 'test_user_' + Math.floor(Math.random() * 10000); // Fake user ID for testing
+        let currentLocker = null;
+
+        document.getElementById('claimBtn').addEventListener('click', async () => {
+            document.getElementById('status').innerText = "Assigning locker...";
+            const response = await fetch(`${backendUrl}/claim`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ user_id: currentUserId })
+            });
+            const data = await response.json();
+            if (response.ok) {
+                currentLocker = data.locker_id;
+                document.getElementById('lockerIdDisplay').innerText = currentLocker;
+                document.getElementById('step1').classList.add('hidden');
+                document.getElementById('step2').classList.remove('hidden');
+                document.getElementById('status').innerText = `Locker ${currentLocker} assigned! (5 minutes to open)`;
+            } else {
+                document.getElementById('status').innerText = `Error: ${data.error}`;
+            }
+        });
+
+        async function sendAction(action) {
+            const response = await fetch(`${backendUrl}/action`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ user_id: currentUserId, locker_id: currentLocker, action: action })
+            });
+            const data = await response.json();
+            document.getElementById('status').innerText = data.message;
+        }
+
+        document.getElementById('unlockBtn').addEventListener('click', () => sendAction('unlock'));
+        document.getElementById('lockBtn').addEventListener('click', () => sendAction('lock'));
+
+        document.getElementById('releaseBtn').addEventListener('click', async () => {
+            await fetch(`${backendUrl}/release`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ user_id: currentUserId, locker_id: currentLocker })
+            });
+            document.getElementById('status').innerText = "Locker released!";
+            document.getElementById('step2').classList.add('hidden');
+            document.getElementById('step1').classList.remove('hidden');
+            currentLocker = null;
+        });
+    </script>
+</body>
+</html>
