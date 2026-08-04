@@ -3,80 +3,154 @@
 <head>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Smart Locker System</title>
+    <script src="https://unpkg.com/@simplewebauthn/browser/dist/bundle/index.js"></script>
     <style>
-        body { font-family: sans-serif; text-align: center; margin-top: 50px; }
-        button { padding: 15px 30px; font-size: 18px; margin: 10px; border: none; border-radius: 8px; cursor: pointer; }
-        #claimBtn { background-color: #4CAF50; color: white; }
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; text-align: center; margin-top: 50px; background-color: #f4f4f9; color: #333; }
+        .container { background: white; max-width: 400px; margin: 0 auto; padding: 30px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
+        h1 { font-size: 24px; margin-bottom: 20px; }
+        button { padding: 15px 25px; font-size: 18px; margin: 10px 5px; border: none; border-radius: 8px; cursor: pointer; transition: 0.2s; width: 90%; }
+        button:active { transform: scale(0.95); }
+        button:disabled { opacity: 0.6; cursor: not-allowed; }
+
+        #scanBtn { background-color: #4CAF50; color: white; }
         #unlockBtn { background-color: #2196F3; color: white; }
         #lockBtn { background-color: #FF9800; color: white; }
         #releaseBtn { background-color: #f44336; color: white; }
+
         .hidden { display: none; }
-        #status { font-weight: bold; margin-top: 20px; }
+        #status { font-weight: bold; margin: 15px 0; padding: 10px; border-radius: 6px; background: #e9ecef; }
+        .sub-text { font-size: 14px; color: #666; margin-top: 20px; }
+        .loader {
+            border: 4px solid #f3f3f3; border-top: 4px solid #4CAF50;
+            border-radius: 50%; width: 20px; height: 20px;
+            animation: spin 1s linear infinite; display: inline-block; vertical-align: middle; margin-right: 8px;
+        }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
     </style>
 </head>
 <body>
-    <h1>Smart Locker System</h1>
-    <p id="status">Click "Claim Locker" to get started.</p>
+    <div class="container">
+        <h1>Smart Locker Control</h1>
+        <div id="status">Scan your fingerprint to claim a locker.</div>
 
-    <div id="step1">
-        <button id="claimBtn">🔓 Claim a Locker</button>
-    </div>
+        <!-- Step 1: Scan Fingerprint to Claim Locker -->
+        <div id="stepScan">
+            <button id="scanBtn">👆 Scan Fingerprint to Claim</button>
+        </div>
 
-    <div id="step2" class="hidden">
-        <p>You have Locker <span id="lockerIdDisplay">-</span></p>
-        <button id="unlockBtn">Open Locker</button>
-        <button id="lockBtn">Close Locker</button>
-        <br><br>
-        <button id="releaseBtn">Return Locker (I'm done)</button>
+        <!-- Step 2: Locker Controls (Automatically shown after successful scan) -->
+        <div id="stepAssigned" class="hidden">
+            <p>You are assigned to <strong>Locker <span id="lockerIdDisplay" style="color:#2196F3;">-</span></strong></p>
+            <button id="unlockBtn">🔓 Open</button>
+            <button id="lockBtn">🔒 Close</button>
+            <br><br>
+            <button id="releaseBtn" style="background-color: #9E9E9E; color: white;">✅ I'm Done (Return)</button>
+        </div>
+
+        <div class="sub-text">*Uses your phone's actual biometric scanner (WebAuthn).</div>
     </div>
 
     <script>
-        const backendUrl = 'http://localhost:3000';
-        let currentUserId = 'test_user_' + Math.floor(Math.random() * 10000); // Fake user ID for testing
+        const { startAuthentication } = SimpleWebAuthnBrowser;
+        const API_BASE_URL = 'http://localhost:3000'; // Backend URL
+
+        let currentUserId = null;
         let currentLocker = null;
 
-        document.getElementById('claimBtn').addEventListener('click', async () => {
-            document.getElementById('status').innerText = "Assigning locker...";
-            const response = await fetch(`${backendUrl}/claim`, {
+        // --- 1. SCAN FINGERPRINT → AUTOMATICALLY CLAIM ---
+        document.getElementById('scanBtn').addEventListener('click', async () => {
+            const statusDiv = document.getElementById('status');
+            const scanBtn = document.getElementById('scanBtn');
+
+            scanBtn.disabled = true;
+            statusDiv.innerText = "Starting fingerprint scan...";
+
+            try {
+                // Step A: Trigger the fingerprint scan
+                const resp = await fetch(`${API_BASE_URL}/login/start`);
+                if (!resp.ok) {
+                    const errData = await resp.json();
+                    throw new Error(errData.error || "Server error. No registered users?");
+                }
+                const options = await resp.json();
+                const authResp = await startAuthentication(options);
+
+                const verificationResp = await fetch(`${API_BASE_URL}/login/finish`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(authResp),
+                });
+                const data = await verificationResp.json();
+
+                if (data.verified) {
+                    currentUserId = data.userID;
+                    statusDiv.innerText = "✅ Fingerprint verified! Claiming locker...";
+
+                    // Step B: Automatically claim the locker for this user
+                    await claimLocker();
+                } else {
+                    statusDiv.innerText = "❌ Fingerprint not recognized. Try again.";
+                    scanBtn.disabled = false;
+                }
+            } catch (error) {
+                statusDiv.innerText = "❌ Error: " + (error.message || "Scan cancelled.");
+                scanBtn.disabled = false;
+            }
+        });
+
+        // --- 2. CLAIM LOCKER (Triggered automatically after scan) ---
+        async function claimLocker() {
+            const statusDiv = document.getElementById('status');
+            const response = await fetch(`${API_BASE_URL}/claim`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ user_id: currentUserId })
             });
             const data = await response.json();
+
             if (response.ok) {
                 currentLocker = data.locker_id;
                 document.getElementById('lockerIdDisplay').innerText = currentLocker;
-                document.getElementById('step1').classList.add('hidden');
-                document.getElementById('step2').classList.remove('hidden');
-                document.getElementById('status').innerText = `Locker ${currentLocker} assigned! (5 minutes to open)`;
-            } else {
-                document.getElementById('status').innerText = `Error: ${data.error}`;
-            }
-        });
 
+                // Hide scan step, show locker controls
+                document.getElementById('stepScan').classList.add('hidden');
+                document.getElementById('stepAssigned').classList.remove('hidden');
+                statusDiv.innerText = `✅ Locker ${currentLocker} assigned! (5 minutes to open)`;
+            } else {
+                statusDiv.innerText = `❌ Error claiming locker: ${data.error}`;
+                document.getElementById('scanBtn').disabled = false;
+            }
+        }
+
+        // --- 3. LOCKER ACTIONS ---
         async function sendAction(action) {
-            const response = await fetch(`${backendUrl}/action`, {
+            const response = await fetch(`${API_BASE_URL}/action`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ user_id: currentUserId, locker_id: currentLocker, action: action })
             });
             const data = await response.json();
-            document.getElementById('status').innerText = data.message;
+            document.getElementById('status').innerText = `✅ ${data.message}`;
         }
 
         document.getElementById('unlockBtn').addEventListener('click', () => sendAction('unlock'));
         document.getElementById('lockBtn').addEventListener('click', () => sendAction('lock'));
 
+        // --- 4. RELEASE LOCKER ---
         document.getElementById('releaseBtn').addEventListener('click', async () => {
-            await fetch(`${backendUrl}/release`, {
+            const response = await fetch(`${API_BASE_URL}/release`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ user_id: currentUserId, locker_id: currentLocker })
             });
-            document.getElementById('status').innerText = "Locker released!";
-            document.getElementById('step2').classList.add('hidden');
-            document.getElementById('step1').classList.remove('hidden');
+            const data = await response.json();
+
+            document.getElementById('status').innerText = `✅ ${data.message}`;
+            document.getElementById('stepAssigned').classList.add('hidden');
+            document.getElementById('stepScan').classList.remove('hidden');
+            document.getElementById('status').innerText = "Locker returned. Scan fingerprint to claim again.";
+            document.getElementById('scanBtn').disabled = false;
             currentLocker = null;
+            currentUserId = null;
         });
     </script>
 </body>
