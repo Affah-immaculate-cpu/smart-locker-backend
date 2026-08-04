@@ -11,7 +11,7 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static('public'));
 
-// --- DYNAMIC DOMAIN SETUP FOR PUBLIC HTTPS ---
+// --- DYNAMIC DOMAIN SETUP FOR HTTPS ---
 // Render injects a URL environment variable automatically
 const isProduction = process.env.NODE_ENV === 'production';
 const publicUrl = process.env.RENDER_EXTERNAL_URL || 'http://localhost:3000';
