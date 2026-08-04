@@ -3,7 +3,8 @@
 <head>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Smart Locker System</title>
-    <script src="https://unpkg.com/@simplewebauthn/browser/dist/bundle/index.js"></script>
+    <!-- FIXED CDN for SimpleWebAuthn -->
+    <script src="https://cdn.jsdelivr.net/npm/@simplewebauthn/browser@8.0.0/dist/bundle/index.umd.min.js"></script>
     <style>
         body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; text-align: center; margin-top: 50px; background-color: #f4f4f9; color: #333; }
         .container { background: white; max-width: 400px; margin: 0 auto; padding: 30px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
@@ -20,6 +21,7 @@
         .hidden { display: none; }
         #status { font-weight: bold; margin: 15px 0; padding: 10px; border-radius: 6px; background: #e9ecef; }
         .sub-text { font-size: 14px; color: #666; margin-top: 20px; }
+
         .debug-box { margin-top: 40px; border-top: 1px solid #ccc; padding-top: 20px; }
         #debugRegisterBtn { background: #333; color: white; font-size: 14px; padding: 10px; width: auto; }
     </style>
@@ -52,15 +54,55 @@
     </div>
 
     <script>
+        // Extract the WebAuthn browser tools
         const { startAuthentication } = SimpleWebAuthnBrowser;
-        // CRITICAL FIX: Using an empty string means "use the current domain (Render.com)"
-        const API_BASE_URL = '';
+        const API_BASE_URL = ''; // Use relative URL to auto-detect Render domain
 
         let currentUserId = null;
         let currentLocker = null;
 
-        // --- 1. SCAN FINGERPRINT → AUTOMATICALLY CLAIM ---
+        // --- 1. DEBUG BUTTON (Click this FIRST) ---
+        document.getElementById('debugRegisterBtn').addEventListener('click', async () => {
+            console.log("✅ DEBUG BUTTON CLICKED!"); // <--- Check Console for this
+
+            const btn = document.getElementById('debugRegisterBtn');
+            const originalText = btn.innerText;
+            btn.innerText = "Creating user...";
+            btn.disabled = true;
+
+            try {
+                const resp = await fetch(`${API_BASE_URL}/register/start`);
+                const options = await resp.json();
+                const fakeResp = await fetch(`${API_BASE_URL}/register/finish`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        id: "fake_id", rawId: "fake_raw",
+                        response: {
+                            attestationObject: "o2NmbXRkbm9uZWdhdHRTdG10",
+                            clientDataJSON: "eyJ0eXBlIjoid2ViYXV0aG4uY3JlYXRlIiwiY2hhbGxlbmdlIjoiZmFrZSIsIm9yaWdpbiI6Imh0dHA6Ly9sb2NhbGhvc3Q6MzAwMCJ9"
+                        },
+                        type: "public-key"
+                    })
+                });
+                const data = await fakeResp.json();
+                if (data.verified) {
+                    alert("✅ Test user created! Now click 'Scan Fingerprint'.");
+                } else {
+                    alert("❌ Registration failed silently.");
+                }
+            } catch (error) {
+                console.error("DEBUG ERROR:", error);
+                alert("❌ Debug error: " + error.message);
+            } finally {
+                btn.innerText = originalText;
+                btn.disabled = false;
+            }
+        });
+
+        // --- 2. SCAN FINGERPRINT BUTTON ---
         document.getElementById('scanBtn').addEventListener('click', async () => {
+            console.log("✅ SCAN BUTTON CLICKED!"); // <--- Check Console for this
+
             const statusDiv = document.getElementById('status');
             const scanBtn = document.getElementById('scanBtn');
 
@@ -75,6 +117,8 @@
                     throw new Error(errData.error || "No registered users! Click the Debug button first.");
                 }
                 const options = await resp.json();
+
+                // This line triggers the phone's native popup
                 const authResp = await startAuthentication(options);
 
                 const verificationResp = await fetch(`${API_BASE_URL}/login/finish`, {
@@ -87,7 +131,7 @@
                     currentUserId = data.userID;
                     statusDiv.innerText = "✅ Fingerprint verified! Claiming locker...";
 
-                    // Step B: Automatically claim the locker for this user
+                    // Step B: Automatically claim the locker
                     await claimLocker();
                 } else {
                     statusDiv.innerText = "❌ Fingerprint not recognized. Try again.";
@@ -99,7 +143,7 @@
             }
         });
 
-        // --- 2. CLAIM LOCKER (Triggered automatically after scan) ---
+        // --- 3. CLAIM LOCKER ---
         async function claimLocker() {
             const statusDiv = document.getElementById('status');
             const response = await fetch(`${API_BASE_URL}/claim`, {
@@ -113,7 +157,6 @@
                 currentLocker = data.locker_id;
                 document.getElementById('lockerIdDisplay').innerText = currentLocker;
 
-                // Hide scan step, show locker controls
                 document.getElementById('stepScan').classList.add('hidden');
                 document.getElementById('stepAssigned').classList.remove('hidden');
                 statusDiv.innerText = `✅ Locker ${currentLocker} assigned! (5 minutes to open)`;
@@ -123,7 +166,7 @@
             }
         }
 
-        // --- 3. LOCKER ACTIONS ---
+        // --- 4. LOCKER ACTIONS ---
         async function sendAction(action) {
             const response = await fetch(`${API_BASE_URL}/action`, {
                 method: 'POST',
@@ -137,7 +180,7 @@
         document.getElementById('unlockBtn').addEventListener('click', () => sendAction('unlock'));
         document.getElementById('lockBtn').addEventListener('click', () => sendAction('lock'));
 
-        // --- 4. RELEASE LOCKER ---
+        // --- 5. RELEASE LOCKER ---
         document.getElementById('releaseBtn').addEventListener('click', async () => {
             const response = await fetch(`${API_BASE_URL}/release`, {
                 method: 'POST',
@@ -153,43 +196,6 @@
             document.getElementById('scanBtn').disabled = false;
             currentLocker = null;
             currentUserId = null;
-        });
-
-        // --- 5. TEMPORARY DEBUG TO SEED DATABASE ---
-        document.getElementById('debugRegisterBtn').addEventListener('click', async () => {
-            const btn = document.getElementById('debugRegisterBtn');
-            const originalText = btn.innerText;
-            btn.innerText = "Creating user...";
-            btn.disabled = true;
-
-            try {
-                const resp = await fetch(`${API_BASE_URL}/register/start`);
-                const options = await resp.json();
-                // Inject a "fake" WebAuthn registration to seed the database (Skips the browser UI)
-                const fakeResp = await fetch(`${API_BASE_URL}/register/finish`, {
-                    method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        id: "fake_id",
-                        rawId: "fake_raw",
-                        response: {
-                            attestationObject: "o2NmbXRkbm9uZWdhdHRTdG10",
-                            clientDataJSON: "eyJ0eXBlIjoid2ViYXV0aG4uY3JlYXRlIiwiY2hhbGxlbmdlIjoiZmFrZSIsIm9yaWdpbiI6Imh0dHA6Ly9sb2NhbGhvc3Q6MzAwMCJ9"
-                        },
-                        type: "public-key"
-                    })
-                });
-                const data = await fakeResp.json();
-                if (data.verified) {
-                    alert("✅ Success! A test user is now registered. Click the 'Scan Fingerprint' button to claim a locker!");
-                } else {
-                    alert("❌ Registration failed silently.");
-                }
-            } catch (error) {
-                alert("❌ Debug error: " + error.message);
-            } finally {
-                btn.innerText = originalText;
-                btn.disabled = false;
-            }
         });
     </script>
 </body>
