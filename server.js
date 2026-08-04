@@ -11,8 +11,6 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static('public'));
 
-// --- DYNAMIC DOMAIN SETUP FOR HTTPS ---
-// Render injects a URL environment variable automatically
 const isProduction = process.env.NODE_ENV === 'production';
 const publicUrl = process.env.RENDER_EXTERNAL_URL || 'http://localhost:3000';
 const rpID = isProduction ? new URL(publicUrl).hostname : 'localhost';
@@ -22,9 +20,7 @@ console.log(`🔥 Running in ${isProduction ? 'Production' : 'Development'} mode
 console.log(`🔒 RP ID: ${rpID}`);
 console.log(`🌐 Expected Origin: ${expectedOrigin}`);
 
-// --- DATABASE (SQLite) ---
-// Note: Free Render servers wipe SQLite files on restart. For a permanent database,
-// we'd use MongoDB Atlas, but SQLite is fine for a working prototype.
+// --- DATABASE ---
 const db = new sqlite3.Database(path.join(__dirname, 'lockers.db'));
 db.serialize(() => {
     db.run("CREATE TABLE IF NOT EXISTS lockers (id INTEGER PRIMARY KEY, locker_id INTEGER, state TEXT, user_id TEXT)");
@@ -36,9 +32,9 @@ db.serialize(() => {
     });
 });
 
-// --- MQTT CONNECTION (USE ENVIRONMENT VARIABLES FOR SECURITY) ---
+// --- MQTT ---
 const config = {
-    mqtt_host: process.env.MQTT_HOST || 'mqtts://f1c8e1bf4da9440c983af45fcaf5f040.s1.eu.hivemq.cloud:8883',
+  mqtt_host: process.env.MQTT_HOST || 'mqtts://YOUR_CLUSTER.s1.eu.hivemq.cloud:8883',
     mqtt_user: process.env.MQTT_USER || 'smart-locker',
     mqtt_pass: process.env.MQTT_PASS || 'forwards',
     mqtt_topic: 'esp32/lock/command'
@@ -48,10 +44,46 @@ mqttClient.on('connect', () => console.log('✅ MQTT Connected to HiveMQ'));
 
 const challengeStore = {};
 
-// --- WEBAUTHN ROUTES ---
+// --- 1. WEBAUTHN REGISTRATION ROUTES ---
+app.post('/register/start', (req, res) => {
+    const userID = crypto.randomBytes(16).toString('hex');
+    const options = generateRegistrationOptions({
+    rpID: rpID,
+    rpName: 'Smart Locker System',
+    userID: userID,
+    userName: `user_${userID}`,
+    attestationType: 'none',
+    });
+    challengeStore[options.challenge] = userID;
+    res.json(options);
+});
+
+app.post('/register/finish', async (req, res) => {
+    const { body } = req;
+    const userID = challengeStore[body.challenge];
+    if (!userID) return res.status(400).json({ error: 'Invalid challenge' });
+    try {
+    const verification = await verifyRegistrationResponse({
+        response: body,
+        expectedChallenge: body.challenge,
+        expectedRPID: rpID,
+        expectedOrigin: expectedOrigin,
+    });
+    if (verification.verified && verification.registrationInfo) {
+        const { credentialID, credentialPublicKey, counter } = verification.registrationInfo;
+        db.run("INSERT INTO users (id, credential_id, public_key, counter) VALUES (?, ?, ?, ?)",
+        [userID, credentialID.toString('base64url'), credentialPublicKey.toString('base64url'), counter]);
+        delete challengeStore[body.challenge];
+        return res.json({ verified: true, userID });
+    }
+    } catch (error) { return res.status(400).json({ error: error.message }); }
+    res.status(400).json({ error: 'Registration failed' });
+});
+
+// --- 2. WEBAUTHN LOGIN ROUTES ---
 app.post('/login/start', (req, res) => {
   db.all("SELECT * FROM users", (err, rows) => {
-    if (rows.length === 0) return res.status(404).json({ error: 'No users registered. Please register first.' });
+    if (rows.length === 0) return res.status(404).json({ error: 'No users registered' });
     const options = generateAuthenticationOptions({
         rpID: rpID,
         allowCredentials: rows.map(u => ({ id: Buffer.from(u.credential_id, 'base64url'), type: 'public-key' })),
@@ -65,7 +97,6 @@ app.post('/login/finish', async (req, res) => {
     const { body } = req;
     if (!challengeStore[body.challenge]) return res.status(400).json({ error: 'Invalid challenge' });
     delete challengeStore[body.challenge];
-
   db.get("SELECT * FROM users WHERE credential_id = ?", [body.id], async (err, row) => {
     if (!row) return res.status(400).json({ error: 'User not found' });
     try {
@@ -74,11 +105,7 @@ app.post('/login/finish', async (req, res) => {
         expectedChallenge: body.challenge,
         expectedRPID: rpID,
         expectedOrigin: expectedOrigin,
-        authenticator: {
-            credentialID: Buffer.from(row.credential_id, 'base64url'),
-            credentialPublicKey: Buffer.from(row.public_key, 'base64url'),
-            counter: row.counter
-        },
+        authenticator: { credentialID: Buffer.from(row.credential_id, 'base64url'), credentialPublicKey: Buffer.from(row.public_key, 'base64url'), counter: row.counter },
         });
         if (verification.verified) {
         db.run("UPDATE users SET counter = ? WHERE id = ?", [verification.authenticationInfo.newCounter, row.id]);
@@ -89,7 +116,7 @@ app.post('/login/finish', async (req, res) => {
     });
 });
 
-// --- LOCKER API ---
+// --- 3. LOCKER API ROUTES ---
 app.post('/claim', (req, res) => {
     const { user_id } = req.body;
   db.get("SELECT * FROM lockers WHERE state = 'AVAILABLE' LIMIT 1", (err, row) => {
@@ -122,5 +149,26 @@ app.post('/release', (req, res) => {
     mqttClient.publish(config.mqtt_topic, JSON.stringify({ cmd: 'display', locker: locker_id, status: 'AVAILABLE', user: null }));
     res.json({ message: 'Locker released' });
 });
+
+// --- 4. TIMERS ---
+setInterval(() => {
+    const now = Math.floor(Date.now() / 1000);
+  db.all("SELECT * FROM lockers WHERE state = 'ASSIGNED' AND lease_expiry < ?", [now], (err, rows) => {
+    rows.forEach(row => {
+        db.run("UPDATE lockers SET state = 'AVAILABLE', user_id = NULL, lease_expiry = NULL WHERE locker_id = ?", [row.locker_id]);
+        mqttClient.publish(config.mqtt_topic, JSON.stringify({ cmd: 'display', locker: row.locker_id, status: 'AVAILABLE', user: null }));
+    });
+    });
+  const twentyFourHoursAgo = now - (60 * 60 * 24);
+  db.all("SELECT * FROM lockers WHERE state = 'OCCUPIED' AND occupied_since < ?", [twentyFourHoursAgo], (err, rows) => {
+    rows.forEach(row => {
+        db.run("UPDATE lockers SET state = 'AVAILABLE', user_id = NULL, lease_expiry = NULL, occupied_since = NULL WHERE locker_id = ?", [row.locker_id]);
+        mqttClient.publish(config.mqtt_topic, JSON.stringify({ cmd: 'unlock', locker: row.locker_id }));
+        setTimeout(() => {
+            mqttClient.publish(config.mqtt_topic, JSON.stringify({ cmd: 'display', locker: row.locker_id, status: 'AVAILABLE', user: null }));
+        }, 5000);
+    });
+    });
+}, 15000);
 
 app.listen(3000, () => console.log(`🚀 Server ready at ${expectedOrigin}`));
