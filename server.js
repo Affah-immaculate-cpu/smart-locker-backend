@@ -16,7 +16,17 @@ app.use(express.static('public'));
 
 const isProduction = process.env.NODE_ENV === 'production';
 const expectedOrigin = process.env.EXPECTED_ORIGIN || process.env.RENDER_EXTERNAL_URL || 'http://localhost:3000';
-const rpID = process.env.RP_ID || new URL(expectedOrigin).hostname;
+let rpID = process.env.RP_ID || null;
+if (!rpID) {
+    try {
+        // Ensure URL has a scheme so new URL() doesn't throw for values like 'localhost:3000'
+        const originForUrl = /^[a-zA-Z]+:\/\//.test(expectedOrigin) ? expectedOrigin : `https://${expectedOrigin}`;
+        rpID = new URL(originForUrl).hostname;
+    } catch (e) {
+        // Fallback: strip protocol/port if parsing fails
+        rpID = expectedOrigin.replace(/^https?:\/\//, '').split(':')[0];
+    }
+}
 
 console.log(`🔥 Running in ${isProduction ? 'Production' : 'Development'} mode`);
 console.log(`🔒 RP ID: ${rpID}`);
@@ -53,12 +63,15 @@ if (config.mqtt_host) {
 const challengeStore = {};
 
 // --- 1. WEBAUTHN REGISTRATION ROUTES ---
-app.post('/register/start', (req, res) => {
+app.post('/register/start', async (req, res) => {
     const userID = crypto.randomBytes(16).toString('hex');
-    const options = generateRegistrationOptions({
-        rpID,
+    // simplewebauthn/server requires a non-string userID (Buffer/Uint8Array).
+    // Keep the hex string version for DB storage but pass a Buffer to the library.
+    const userIDBuffer = Buffer.from(userID, 'hex');
+    const options = await generateRegistrationOptions({
+        rpID: rpID,
         rpName: 'Smart Locker System',
-        userID,
+        userID: userIDBuffer,
         userName: `user_${userID}`,
         attestationType: 'none',
         authenticatorSelection: {
@@ -67,13 +80,41 @@ app.post('/register/start', (req, res) => {
         },
         userVerification: 'required',
     });
-    challengeStore[options.challenge] = userID;
-    res.json(options);
+    // Debug: log raw options (before serialization)
+    try { console.debug('register/start: raw options keys', Object.keys(options || {})); } catch (e) { }
+    // Serialize binary fields to base64url strings for browser compatibility
+    const serialize = (val) => {
+        if (!val && val !== 0) return val;
+        if (Buffer.isBuffer(val)) return val.toString('base64url');
+        if (val instanceof Uint8Array) return Buffer.from(val).toString('base64url');
+        return val;
+    };
+    if (options.user && options.user.id) options.user.id = serialize(options.user.id);
+    try { console.debug('register/start: serialized options sample', { challenge: options.challenge, userId: options.user && options.user.id }); } catch (e) { }
+    if (options.challenge) options.challenge = String(options.challenge);
+    if (Array.isArray(options.excludeCredentials)) {
+        options.excludeCredentials = options.excludeCredentials.map(c => ({
+            id: serialize(c.id),
+            type: c.type,
+            transports: c.transports,
+        }));
+    }
+    const jsonOptions = JSON.parse(JSON.stringify(options));
+    challengeStore[String(jsonOptions.challenge)] = userID;
+    try {
+        console.log('register/start: jsonOptions keys', Object.keys(jsonOptions || {}));
+        console.log('register/start: jsonOptions sample', JSON.stringify(jsonOptions));
+    } catch (e) { }
+    res.json(jsonOptions);
 });
 
 app.post('/register/finish', async (req, res) => {
     const { body } = req;
-    const userID = challengeStore[body.challenge];
+    // Defensive logging to help diagnose client payload issues
+    try {
+        console.debug('register/finish: incoming body keys', Object.keys(body || {}));
+    } catch (e) { }
+    const userID = challengeStore[body && body.challenge];
     if (!userID) {
         console.error('register/finish: invalid or missing challenge', { challenge: body && body.challenge, body });
         return res.status(400).json({ error: 'Invalid challenge' });
@@ -82,8 +123,8 @@ app.post('/register/finish', async (req, res) => {
         const verification = await verifyRegistrationResponse({
             response: body,
             expectedChallenge: body.challenge,
-            expectedRPID: rpID,
-            expectedOrigin: expectedOrigin,
+            expectedRPID: String(rpID),
+            expectedOrigin: String(expectedOrigin),
         });
 
         // Log verification details for debugging
@@ -141,11 +182,11 @@ app.post('/login/start', (req, res) => {
 
 app.post('/login/finish', async (req, res) => {
     const { body } = req;
-    if (!challengeStore[body.challenge]) {
+    if (!challengeStore[body && body.challenge]) {
         console.error('login/finish: invalid or missing challenge', { challenge: body && body.challenge, body });
         return res.status(400).json({ error: 'Invalid challenge' });
     }
-    delete challengeStore[body.challenge];
+    delete challengeStore[body && body.challenge];
     db.get("SELECT * FROM users WHERE credential_id = ?", [body.id], async (err, row) => {
         if (err) {
             console.error('login/finish: DB error fetching user', err, { body });
@@ -159,8 +200,8 @@ app.post('/login/finish', async (req, res) => {
             const verification = await verifyAuthenticationResponse({
                 response: body,
                 expectedChallenge: body.challenge,
-                expectedRPID: rpID,
-                expectedOrigin: expectedOrigin,
+                expectedRPID: String(rpID),
+                expectedOrigin: String(expectedOrigin),
                 authenticator: { credentialID: Buffer.from(row.credential_id, 'base64url'), credentialPublicKey: Buffer.from(row.public_key, 'base64url'), counter: row.counter },
             });
 
@@ -253,18 +294,28 @@ app.post('/release', (req, res) => {
 setInterval(() => {
     const now = Math.floor(Date.now() / 1000);
     db.all("SELECT * FROM lockers WHERE state = 'ASSIGNED' AND lease_expiry < ?", [now], (err, rows) => {
+        if (err) {
+            console.error('timer: error querying assigned lockers', err);
+            return;
+        }
+        if (!rows || rows.length === 0) return;
         rows.forEach(row => {
             db.run("UPDATE lockers SET state = 'AVAILABLE', user_id = NULL, lease_expiry = NULL WHERE locker_id = ?", [row.locker_id]);
-            mqttClient.publish(config.mqtt_topic, JSON.stringify({ cmd: 'display', locker: row.locker_id, status: 'AVAILABLE', user: null }));
+            if (mqttClient) mqttClient.publish(config.mqtt_topic, JSON.stringify({ cmd: 'display', locker: row.locker_id, status: 'AVAILABLE', user: null }));
         });
     });
     const twentyFourHoursAgo = now - (60 * 60 * 24);
     db.all("SELECT * FROM lockers WHERE state = 'OCCUPIED' AND occupied_since < ?", [twentyFourHoursAgo], (err, rows) => {
+        if (err) {
+            console.error('timer: error querying occupied lockers', err);
+            return;
+        }
+        if (!rows || rows.length === 0) return;
         rows.forEach(row => {
             db.run("UPDATE lockers SET state = 'AVAILABLE', user_id = NULL, lease_expiry = NULL, occupied_since = NULL WHERE locker_id = ?", [row.locker_id]);
-            mqttClient.publish(config.mqtt_topic, JSON.stringify({ cmd: 'unlock', locker: row.locker_id }));
+            if (mqttClient) mqttClient.publish(config.mqtt_topic, JSON.stringify({ cmd: 'unlock', locker: row.locker_id }));
             setTimeout(() => {
-                mqttClient.publish(config.mqtt_topic, JSON.stringify({ cmd: 'display', locker: row.locker_id, status: 'AVAILABLE', user: null }));
+                if (mqttClient) mqttClient.publish(config.mqtt_topic, JSON.stringify({ cmd: 'display', locker: row.locker_id, status: 'AVAILABLE', user: null }));
             }, 5000);
         });
     });
