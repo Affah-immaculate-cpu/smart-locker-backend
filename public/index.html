@@ -71,7 +71,7 @@
             btn.disabled = true;
 
             try {
-                const resp = await fetch(`${API_BASE_URL}/register/start`);
+                const resp = await fetch(`${API_BASE_URL}/register/start`, { method: 'POST' });
                 const options = await resp.json();
                 const fakeResp = await fetch(`${API_BASE_URL}/register/finish`, {
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -111,7 +111,7 @@
 
             try {
                 // Step A: Trigger the fingerprint scan
-                const resp = await fetch(`${API_BASE_URL}/login/start`);
+                const resp = await fetch(`${API_BASE_URL}/login/start`, { method: 'POST' });
                 if (!resp.ok) {
                     const errData = await resp.json();
                     throw new Error(errData.error || "No registered users! Click the Debug button first.");

@@ -88,6 +88,14 @@ app.post('/login/start', (req, res) => {
         rpID: rpID,
         allowCredentials: rows.map(u => ({ id: Buffer.from(u.credential_id, 'base64url'), type: 'public-key' })),
     });
+    // Ensure allowCredentials.id values are serialized as base64url strings
+    if (options.allowCredentials && Array.isArray(options.allowCredentials)) {
+        options.allowCredentials = options.allowCredentials.map(c => ({
+            id: Buffer.isBuffer(c.id) ? c.id.toString('base64url') : c.id,
+            type: c.type,
+            transports: c.transports,
+        }));
+    }
     challengeStore[options.challenge] = 'login';
     res.json(options);
     });
