@@ -218,4 +218,11 @@ setInterval(() => {
 }, 15000);
 
 const PORT = process.env.PORT || 3000;
+// Global error handler to ensure JSON responses (prevents HTML error pages)
+app.use((err, req, res, next) => {
+    console.error('Unhandled error:', err && (err.stack || err));
+    if (res.headersSent) return next(err);
+    res.status(500).json({ error: 'Internal server error', details: err && err.message });
+});
+
 app.listen(PORT, () => console.log(`🚀 Server ready at ${expectedOrigin} (listening on port ${PORT})`));
