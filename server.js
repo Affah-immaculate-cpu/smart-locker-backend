@@ -62,36 +62,104 @@ if (config.mqtt_host) {
 
 const challengeStore = {};
 
+const toBase64Url = (val) => {
+    if (val === undefined || val === null) return val;
+    if (Buffer.isBuffer(val)) return val.toString('base64url');
+    if (val instanceof Uint8Array || ArrayBuffer.isView(val)) return Buffer.from(val).toString('base64url');
+    if (val instanceof ArrayBuffer) return Buffer.from(new Uint8Array(val)).toString('base64url');
+    if (typeof val === 'string') return val.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    return val;
+};
+
+const normalizeBase64Url = (value) => {
+    if (typeof value !== 'string') return null;
+    return value.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+};
+
+const extractChallengeFromWebAuthnResponse = (body) => {
+    if (!body) return null;
+    if (typeof body.challenge === 'string' && body.challenge.trim()) return normalizeBase64Url(body.challenge);
+
+    const clientDataJSON = body.response && body.response.clientDataJSON;
+    if (!clientDataJSON) return null;
+
+    const decodeString = (str) => {
+        for (const encoding of ['base64url', 'base64']) {
+            try {
+                const decoded = Buffer.from(str, encoding);
+                const text = decoded.toString('utf8');
+                if (typeof text === 'string' && text.trim().startsWith('{')) return text;
+            } catch (e) {
+                continue;
+            }
+        }
+        return null;
+    };
+
+    let jsonString = null;
+    if (typeof clientDataJSON === 'string') {
+        jsonString = decodeString(clientDataJSON);
+    } else if (Buffer.isBuffer(clientDataJSON)) {
+        jsonString = clientDataJSON.toString('utf8');
+    } else if (clientDataJSON && typeof clientDataJSON === 'object') {
+        if (Array.isArray(clientDataJSON.data)) {
+            try {
+                jsonString = Buffer.from(clientDataJSON.data).toString('utf8');
+            } catch (e) {
+                return null;
+            }
+        } else {
+            const arrayKeys = Object.keys(clientDataJSON).filter((key) => /^\d+$/.test(key));
+            if (arrayKeys.length > 0) {
+                const bytes = arrayKeys.sort((a, b) => Number(a) - Number(b)).map((key) => clientDataJSON[key]);
+                try {
+                    jsonString = Buffer.from(bytes).toString('utf8');
+                } catch (e) {
+                    return null;
+                }
+            }
+        }
+    }
+
+    if (!jsonString) return null;
+    try {
+        const parsed = JSON.parse(jsonString);
+        return typeof parsed.challenge === 'string' ? normalizeBase64Url(parsed.challenge) : null;
+    } catch (e) {
+        return null;
+    }
+};
+
 // --- 1. WEBAUTHN REGISTRATION ROUTES ---
 app.post('/register/start', async (req, res) => {
     const userID = crypto.randomBytes(16).toString('hex');
     // simplewebauthn/server requires a non-string userID (Buffer/Uint8Array).
     // Keep the hex string version for DB storage but pass a Buffer to the library.
     const userIDBuffer = Buffer.from(userID, 'hex');
-    const options = await generateRegistrationOptions({
-        rpID: rpID,
-        rpName: 'Smart Locker System',
-        userID: userIDBuffer,
-        userName: `user_${userID}`,
-        attestationType: 'none',
-        authenticatorSelection: {
-            authenticatorAttachment: 'platform',
+    let options;
+    try {
+        options = await generateRegistrationOptions({
+            rpID: rpID,
+            rpName: 'Smart Locker System',
+            userID: userIDBuffer,
+            userName: `user_${userID}`,
+            attestationType: 'none',
+            authenticatorSelection: {
+                authenticatorAttachment: 'platform',
+                userVerification: 'required',
+            },
             userVerification: 'required',
-        },
-        userVerification: 'required',
-    });
+        });
+    } catch (error) {
+        console.error('register/start: failed to generate registration options', error);
+        return res.status(500).json({ error: 'Unable to start registration' });
+    }
     // Debug: log raw options (before serialization)
     try { console.debug('register/start: raw options keys', Object.keys(options || {})); } catch (e) { }
     // Serialize binary fields to base64url strings for browser compatibility
-    const serialize = (val) => {
-        if (!val && val !== 0) return val;
-        if (Buffer.isBuffer(val)) return val.toString('base64url');
-        if (val instanceof Uint8Array) return Buffer.from(val).toString('base64url');
-        return val;
-    };
-    if (options.user && options.user.id) options.user.id = serialize(options.user.id);
+    if (options.user && options.user.id) options.user.id = toBase64Url(options.user.id);
+    if (options.challenge) options.challenge = toBase64Url(options.challenge);
     try { console.debug('register/start: serialized options sample', { challenge: options.challenge, userId: options.user && options.user.id }); } catch (e) { }
-    if (options.challenge) options.challenge = String(options.challenge);
     if (Array.isArray(options.excludeCredentials)) {
         options.excludeCredentials = options.excludeCredentials.map(c => ({
             id: serialize(c.id),
@@ -100,7 +168,7 @@ app.post('/register/start', async (req, res) => {
         }));
     }
     const jsonOptions = JSON.parse(JSON.stringify(options));
-    challengeStore[String(jsonOptions.challenge)] = userID;
+    challengeStore[normalizeBase64Url(String(jsonOptions.challenge))] = userID;
     try {
         console.log('register/start: jsonOptions keys', Object.keys(jsonOptions || {}));
         console.log('register/start: jsonOptions sample', JSON.stringify(jsonOptions));
@@ -114,15 +182,60 @@ app.post('/register/finish', async (req, res) => {
     try {
         console.debug('register/finish: incoming body keys', Object.keys(body || {}));
     } catch (e) { }
-    const userID = challengeStore[body && body.challenge];
+    if (!body || typeof body !== 'object' || !body.response || typeof body.response !== 'object') {
+        console.error('register/finish: missing or invalid response payload', { body });
+        return res.status(400).json({ error: 'Missing authenticator response payload' });
+    }
+    if (!body.response.clientDataJSON || !body.response.attestationObject) {
+        console.error('register/finish: missing required registration response fields', { body });
+        return res.status(400).json({ error: 'Missing clientDataJSON or attestationObject in registration response' });
+    }
+    const clientDataJSON = body && body.response && body.response.clientDataJSON;
+    const clientDataType = clientDataJSON === undefined ? 'undefined' : ArrayBuffer.isView(clientDataJSON) ? 'ArrayBufferView' : (clientDataJSON instanceof ArrayBuffer ? 'ArrayBuffer' : typeof clientDataJSON);
+    const clientDataLength = clientDataJSON && (clientDataJSON.byteLength || clientDataJSON.length || (clientDataJSON.data && clientDataJSON.data.length) || 0);
+    console.debug('register/finish: clientDataJSON info', { clientDataType, clientDataLength });
+    const challenge = extractChallengeFromWebAuthnResponse(body);
+    const userID = challenge && challengeStore[challenge];
+    const knownChallenges = Object.keys(challengeStore);
+    console.debug('register/finish: challenge lookup', { challenge, knownChallenges });
     if (!userID) {
-        console.error('register/finish: invalid or missing challenge', { challenge: body && body.challenge, body });
+        console.error('register/finish: invalid or missing challenge', { challenge, knownChallenges, body });
         return res.status(400).json({ error: 'Invalid challenge' });
     }
     try {
+        // Normalize response binary fields to base64url strings so the library
+        // decoders never receive undefined or non-string values that call
+        // .toString() internally.
+        const normalizeIncomingField = (val) => {
+            if (typeof val === 'string') return val;
+            if (Buffer.isBuffer(val)) return val.toString('base64url');
+            if (val instanceof Uint8Array || ArrayBuffer.isView(val)) return Buffer.from(val).toString('base64url');
+            if (val instanceof ArrayBuffer) return Buffer.from(new Uint8Array(val)).toString('base64url');
+            // handle JSON-serialized numeric-indexed objects (e.g., {"0": 10, "1": 20})
+            if (val && typeof val === 'object') {
+                const keys = Object.keys(val).filter(k => /^\d+$/.test(k));
+                if (keys.length > 0) {
+                    const bytes = keys.sort((a, b) => Number(a) - Number(b)).map(k => val[k]);
+                    try { return Buffer.from(bytes).toString('base64url'); } catch (e) { return val; }
+                }
+            }
+            return val;
+        };
+
+        // Coerce common response subfields
+        if (body && body.response) {
+            body.response.clientDataJSON = normalizeIncomingField(body.response.clientDataJSON);
+            body.response.attestationObject = normalizeIncomingField(body.response.attestationObject);
+            body.response.authenticatorData = normalizeIncomingField(body.response.authenticatorData);
+            body.response.signature = normalizeIncomingField(body.response.signature);
+            // rawId/id may be sent as binary-like values; make sure they are strings
+            body.rawId = normalizeIncomingField(body.rawId || body.id || body.rawId);
+            body.id = typeof body.id === 'string' ? body.id : (body.rawId || body.id);
+        }
+
         const verification = await verifyRegistrationResponse({
             response: body,
-            expectedChallenge: body.challenge,
+            expectedChallenge: challenge,
             expectedRPID: String(rpID),
             expectedOrigin: String(expectedOrigin),
         });
@@ -134,18 +247,39 @@ app.post('/register/finish', async (req, res) => {
         });
 
         if (verification && verification.verified && verification.registrationInfo) {
-            const { credentialID, credentialPublicKey, counter } = verification.registrationInfo;
+            const registrationInfo = verification.registrationInfo;
+            const credentialInfo = registrationInfo.credential || {};
+            const credentialID = registrationInfo.credentialID || credentialInfo.id;
+            const credentialPublicKey = registrationInfo.credentialPublicKey || credentialInfo.publicKey;
+            const counter = registrationInfo.counter ?? credentialInfo.counter;
+
+            const normalizeCredentialValue = (value) => {
+                if (Buffer.isBuffer(value)) return value.toString('base64url');
+                if (value instanceof Uint8Array || ArrayBuffer.isView(value)) return Buffer.from(value).toString('base64url');
+                if (value instanceof ArrayBuffer) return Buffer.from(new Uint8Array(value)).toString('base64url');
+                return typeof value === 'string' ? value : null;
+            };
+
+            const storedCredentialID = normalizeCredentialValue(credentialID);
+            const storedPublicKey = normalizeCredentialValue(credentialPublicKey);
+
+            if (!storedCredentialID || !storedPublicKey || counter === undefined || counter === null) {
+                console.error('register/finish: missing registration credential values', { credentialID, credentialPublicKey, counter, registrationInfo });
+                return res.status(500).json({ error: 'Incomplete registration information' });
+            }
+
             return db.run("INSERT INTO users (id, credential_id, public_key, counter) VALUES (?, ?, ?, ?)",
-                [userID, credentialID.toString('base64url'), credentialPublicKey.toString('base64url'), counter], (dbErr) => {
+                [userID, storedCredentialID, storedPublicKey, counter], (dbErr) => {
                     if (dbErr) {
                         console.error('register/finish: DB insert error', dbErr);
                         return res.status(500).json({ error: 'Failed to save registration' });
                     }
-                    delete challengeStore[body.challenge];
+                    delete challengeStore[challenge];
                     return res.json({ verified: true, userID });
                 });
         } else {
             console.error('register/finish: verification failed or missing registrationInfo', { verification, body, userID });
+            return res.status(400).json({ error: 'Registration verification failed' });
         }
     } catch (error) {
         console.error('register/finish: exception during verification', { error: error && (error.stack || error), body, userID });
@@ -157,36 +291,50 @@ app.post('/register/finish', async (req, res) => {
 
 // --- 2. WEBAUTHN LOGIN ROUTES ---
 app.post('/login/start', (req, res) => {
-    db.all("SELECT * FROM users", (err, rows) => {
+    db.all("SELECT * FROM users", async (err, rows) => {
         if (err) {
             console.error('login/start DB error', err);
             return res.status(500).json({ error: 'Database error' });
         }
         if (!rows || rows.length === 0) return res.status(404).json({ error: 'No users registered' });
-        const options = generateAuthenticationOptions({
-            rpID,
-            allowCredentials: rows.map(u => ({ id: Buffer.from(u.credential_id, 'base64url'), type: 'public-key' })),
-            userVerification: 'required',
-        });
-        if (options.allowCredentials && Array.isArray(options.allowCredentials)) {
-            options.allowCredentials = options.allowCredentials.map(c => ({
-                id: Buffer.isBuffer(c.id) ? c.id.toString('base64url') : c.id,
-                type: c.type,
-                transports: c.transports,
-            }));
+
+        try {
+            const options = await generateAuthenticationOptions({
+                rpID,
+                allowCredentials: rows.map(u => ({
+                    id: Buffer.from(u.credential_id, 'base64url'),
+                    type: 'public-key',
+                })),
+                userVerification: 'required',
+            });
+
+            // Serialize binary fields to base64url for the browser
+            if (options.allowCredentials && Array.isArray(options.allowCredentials)) {
+                options.allowCredentials = options.allowCredentials.map(c => ({
+                    id: toBase64Url(c.id),
+                    type: c.type,
+                    transports: c.transports,
+                }));
+            }
+            if (options.challenge) options.challenge = toBase64Url(options.challenge);
+
+            challengeStore[normalizeBase64Url(String(options.challenge))] = 'login';
+            res.json(options);
+        } catch (error) {
+            console.error('login/start: failed to generate options', error);
+            res.status(500).json({ error: 'Failed to generate authentication options' });
         }
-        challengeStore[options.challenge] = 'login';
-        res.json(options);
     });
 });
 
 app.post('/login/finish', async (req, res) => {
     const { body } = req;
-    if (!challengeStore[body && body.challenge]) {
-        console.error('login/finish: invalid or missing challenge', { challenge: body && body.challenge, body });
+    const challenge = extractChallengeFromWebAuthnResponse(body);
+    if (!challenge || !challengeStore[challenge]) {
+        console.error('login/finish: invalid or missing challenge', { challenge, body });
         return res.status(400).json({ error: 'Invalid challenge' });
     }
-    delete challengeStore[body && body.challenge];
+    delete challengeStore[challenge];
     db.get("SELECT * FROM users WHERE credential_id = ?", [body.id], async (err, row) => {
         if (err) {
             console.error('login/finish: DB error fetching user', err, { body });
@@ -199,7 +347,7 @@ app.post('/login/finish', async (req, res) => {
         try {
             const verification = await verifyAuthenticationResponse({
                 response: body,
-                expectedChallenge: body.challenge,
+                expectedChallenge: challenge,
                 expectedRPID: String(rpID),
                 expectedOrigin: String(expectedOrigin),
                 authenticator: { credentialID: Buffer.from(row.credential_id, 'base64url'), credentialPublicKey: Buffer.from(row.public_key, 'base64url'), counter: row.counter },

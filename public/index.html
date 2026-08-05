@@ -4,8 +4,8 @@
 <head>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Smart Locker System</title>
-    <!-- FIXED CDN for SimpleWebAuthn -->
-    <script src="https://cdn.jsdelivr.net/npm/@simplewebauthn/browser@8.0.0/dist/bundle/index.umd.min.js"></script>
+    <!-- FIXED CDN for SimpleWebAuthn matching server package -->
+    <script src="https://cdn.jsdelivr.net/npm/@simplewebauthn/browser@13.3.0/dist/bundle/index.umd.min.js"></script>
     <style>
         body {
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
@@ -115,7 +115,7 @@
 
         <!-- Step 1: Register or Scan Fingerprint -->
         <div id="stepScan">
-            <button id="registerBtn">🆕 Register Fingerprint</button>
+            <button id="registerBtn">Register Fingerprint</button>
             <button id="scanBtn">👆 Scan Fingerprint to Claim</button>
         </div>
 
@@ -153,6 +153,41 @@
             }
         }
 
+        const bufferToBase64Url = (value) => {
+            if (value instanceof ArrayBuffer) {
+                value = new Uint8Array(value);
+            }
+            if (ArrayBuffer.isView(value)) {
+                let binary = '';
+                const chunkSize = 0x8000;
+                for (let i = 0; i < value.length; i += chunkSize) {
+                    binary += String.fromCharCode(...value.subarray(i, i + chunkSize));
+                }
+                return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+            }
+            return value;
+        };
+
+        const transformWebAuthnResponse = (response) => {
+            if (!response || typeof response !== 'object') return response;
+
+            const transformed = {
+                id: response.id,
+                rawId: response.rawId ? bufferToBase64Url(response.rawId) : response.rawId,
+                type: response.type,
+                response: {
+                    clientDataJSON: response.response?.clientDataJSON ? bufferToBase64Url(response.response.clientDataJSON) : undefined,
+                    attestationObject: response.response?.attestationObject ? bufferToBase64Url(response.response.attestationObject) : undefined,
+                    authenticatorData: response.response?.authenticatorData ? bufferToBase64Url(response.response.authenticatorData) : undefined,
+                    signature: response.response?.signature ? bufferToBase64Url(response.response.signature) : undefined,
+                    userHandle: response.response?.userHandle ? bufferToBase64Url(response.response.userHandle) : undefined,
+                    transports: response.response?.transports,
+                },
+            };
+
+            return transformed;
+        };
+
         document.getElementById('registerBtn').addEventListener('click', async () => {
             const registerBtn = document.getElementById('registerBtn');
             registerBtn.disabled = true;
@@ -163,11 +198,18 @@
                 const options = await parseJsonResponse(resp);
                 if (!resp.ok) throw new Error(options.error || 'Failed to start registration');
 
+                const challenge = options.challenge;
                 const attResp = await startRegistration(options);
+                const payload = transformWebAuthnResponse(attResp);
+                payload.challenge = challenge;
+
+                if (!payload.response || !payload.response.clientDataJSON || !payload.response.attestationObject) {
+                    throw new Error('Authenticator response missing required clientDataJSON or attestationObject fields');
+                }
                 const verificationResp = await fetch(`${API_BASE_URL}/register/finish`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(attResp),
+                    body: JSON.stringify(payload),
                 });
                 const data = await parseJsonResponse(verificationResp);
                 if (!verificationResp.ok) throw new Error(data.error || 'Registration failed');
@@ -191,11 +233,14 @@
                 const options = await parseJsonResponse(resp);
                 if (!resp.ok) throw new Error(options.error || 'No registered users. Please register first.');
 
+                const challenge = options.challenge;
                 const authResp = await startAuthentication(options);
+                const payload = transformWebAuthnResponse(authResp);
+                payload.challenge = challenge;
                 const verificationResp = await fetch(`${API_BASE_URL}/login/finish`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(authResp),
+                    body: JSON.stringify(payload),
                 });
                 const data = await parseJsonResponse(verificationResp);
                 if (!verificationResp.ok) throw new Error(data.error || 'Authentication failed');
