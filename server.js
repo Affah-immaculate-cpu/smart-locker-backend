@@ -61,7 +61,10 @@ app.post('/register/start', (req, res) => {
 app.post('/register/finish', async (req, res) => {
     const { body } = req;
     const userID = challengeStore[body.challenge];
-    if (!userID) return res.status(400).json({ error: 'Invalid challenge' });
+    if (!userID) {
+        console.error('register/finish: invalid or missing challenge', { challenge: body && body.challenge, body });
+        return res.status(400).json({ error: 'Invalid challenge' });
+    }
     try {
         const verification = await verifyRegistrationResponse({
             response: body,
@@ -69,14 +72,29 @@ app.post('/register/finish', async (req, res) => {
             expectedRPID: rpID,
             expectedOrigin: expectedOrigin,
         });
-        if (verification.verified && verification.registrationInfo) {
+
+        // Log verification details for debugging
+        console.debug('register/finish verification result', {
+            verified: verification && verification.verified,
+            hasRegistrationInfo: verification && !!verification.registrationInfo,
+        });
+
+        if (verification && verification.verified && verification.registrationInfo) {
             const { credentialID, credentialPublicKey, counter } = verification.registrationInfo;
             db.run("INSERT INTO users (id, credential_id, public_key, counter) VALUES (?, ?, ?, ?)",
-                [userID, credentialID.toString('base64url'), credentialPublicKey.toString('base64url'), counter]);
+                [userID, credentialID.toString('base64url'), credentialPublicKey.toString('base64url'), counter], (dbErr) => {
+                    if (dbErr) console.error('register/finish: DB insert error', dbErr);
+                });
             delete challengeStore[body.challenge];
             return res.json({ verified: true, userID });
+        } else {
+            console.error('register/finish: verification failed or missing registrationInfo', { verification, body, userID });
         }
-    } catch (error) { return res.status(400).json({ error: error.message }); }
+    } catch (error) {
+        console.error('register/finish: exception during verification', { error: error && (error.stack || error), body, userID });
+        return res.status(400).json({ error: error.message });
+    }
+    console.error('register/finish: registration failed (unverified)', { body, userID });
     res.status(400).json({ error: 'Registration failed' });
 });
 
@@ -103,10 +121,20 @@ app.post('/login/start', (req, res) => {
 
 app.post('/login/finish', async (req, res) => {
     const { body } = req;
-    if (!challengeStore[body.challenge]) return res.status(400).json({ error: 'Invalid challenge' });
+    if (!challengeStore[body.challenge]) {
+        console.error('login/finish: invalid or missing challenge', { challenge: body && body.challenge, body });
+        return res.status(400).json({ error: 'Invalid challenge' });
+    }
     delete challengeStore[body.challenge];
     db.get("SELECT * FROM users WHERE credential_id = ?", [body.id], async (err, row) => {
-        if (!row) return res.status(400).json({ error: 'User not found' });
+        if (err) {
+            console.error('login/finish: DB error fetching user', err, { body });
+            return res.status(500).json({ error: 'Server error' });
+        }
+        if (!row) {
+            console.error('login/finish: user not found for credential', { credential_id: body.id, body });
+            return res.status(400).json({ error: 'User not found' });
+        }
         try {
             const verification = await verifyAuthenticationResponse({
                 response: body,
@@ -115,11 +143,21 @@ app.post('/login/finish', async (req, res) => {
                 expectedOrigin: expectedOrigin,
                 authenticator: { credentialID: Buffer.from(row.credential_id, 'base64url'), credentialPublicKey: Buffer.from(row.public_key, 'base64url'), counter: row.counter },
             });
-            if (verification.verified) {
-                db.run("UPDATE users SET counter = ? WHERE id = ?", [verification.authenticationInfo.newCounter, row.id]);
+
+            console.debug('login/finish verification', { verified: verification && verification.verified, authenticationInfo: verification && verification.authenticationInfo });
+
+            if (verification && verification.verified) {
+                db.run("UPDATE users SET counter = ? WHERE id = ?", [verification.authenticationInfo.newCounter, row.id], (dbErr) => {
+                    if (dbErr) console.error('login/finish: DB update counter error', dbErr);
+                });
                 return res.json({ verified: true, userID: row.id });
+            } else {
+                console.error('login/finish: verification failed', { verification, body, storedRow: row });
             }
-        } catch (error) { return res.status(400).json({ error: error.message }); }
+        } catch (error) {
+            console.error('login/finish: exception during verification', { error: error && (error.stack || error), body, storedRow: row });
+            return res.status(400).json({ error: error.message });
+        }
         res.status(400).json({ error: 'Authentication failed' });
     });
 });
