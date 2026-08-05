@@ -54,6 +54,11 @@
             color: white;
         }
 
+        #registerBtn {
+            background-color: #555;
+            color: white;
+        }
+
         #unlockBtn {
             background-color: #2196F3;
             color: white;
@@ -108,8 +113,9 @@
         <h1>Smart Locker Control</h1>
         <div id="status">Scan your fingerprint to claim a locker.</div>
 
-        <!-- Step 1: Scan Fingerprint to Claim Locker -->
+        <!-- Step 1: Register or Scan Fingerprint -->
         <div id="stepScan">
+            <button id="registerBtn">🆕 Register Fingerprint</button>
             <button id="scanBtn">👆 Scan Fingerprint to Claim</button>
         </div>
 
@@ -124,155 +130,136 @@
         </div>
 
         <div class="sub-text">*Uses your phone's actual biometric scanner (WebAuthn).</div>
-
-        <!-- TEMPORARY DEBUG TOOL TO SEED FIRST USER -->
-        <div class="debug-box">
-            <button id="debugRegisterBtn">Debug: Create First Test User</button>
-        </div>
     </div>
 
     <script>
-        // Extract the WebAuthn browser tools
-        const { startAuthentication } = SimpleWebAuthnBrowser;
-        const API_BASE_URL = ''; // Use relative URL to auto-detect Render domain
+        const { startRegistration, startAuthentication } = SimpleWebAuthnBrowser;
+        const API_BASE_URL = '';
 
         let currentUserId = null;
         let currentLocker = null;
 
-        // --- 1. DEBUG BUTTON (Click this FIRST) ---
-        document.getElementById('debugRegisterBtn').addEventListener('click', async () => {
-            console.log("✅ DEBUG BUTTON CLICKED!"); // <--- Check Console for this
+        function showStatus(message, isError = false) {
+            const statusDiv = document.getElementById('status');
+            statusDiv.innerText = `${isError ? '❌ ' : '✅ '} ${message}`;
+        }
 
-            const btn = document.getElementById('debugRegisterBtn');
-            const originalText = btn.innerText;
-            btn.innerText = "Creating user...";
-            btn.disabled = true;
+        async function parseJsonResponse(response) {
+            const body = await response.text();
+            try {
+                return JSON.parse(body);
+            } catch (error) {
+                return { error: body || 'Invalid JSON response' };
+            }
+        }
+
+        document.getElementById('registerBtn').addEventListener('click', async () => {
+            const registerBtn = document.getElementById('registerBtn');
+            registerBtn.disabled = true;
+            showStatus('Starting fingerprint registration...');
 
             try {
                 const resp = await fetch(`${API_BASE_URL}/register/start`, { method: 'POST' });
-                const options = await resp.json();
-                const fakeResp = await fetch(`${API_BASE_URL}/register/finish`, {
-                    method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        challenge: options.challenge,
-                        id: "fake_id",
-                        rawId: "fake_raw",
-                        response: {
-                            attestationObject: "o2NmbXRkbm9uZWdhdHRTdG10",
-                            clientDataJSON: "eyJ0eXBlIjoid2ViYXV0aG4uY3JlYXRlIiwiY2hhbGxlbmdlIjoiZmFrZSIsIm9yaWdpbiI6Imh0dHA6Ly9sb2NhbGhvc3Q6MzAwMCJ9"
-                        },
-                        type: "public-key"
-                    })
+                const options = await parseJsonResponse(resp);
+                if (!resp.ok) throw new Error(options.error || 'Failed to start registration');
+
+                const attResp = await startRegistration(options);
+                const verificationResp = await fetch(`${API_BASE_URL}/register/finish`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(attResp),
                 });
-                const data = await fakeResp.json();
-                if (data.verified) {
-                    alert("✅ Test user created! Now click 'Scan Fingerprint'.");
-                } else {
-                    alert("❌ Registration failed silently.");
-                }
+                const data = await parseJsonResponse(verificationResp);
+                if (!verificationResp.ok) throw new Error(data.error || 'Registration failed');
+
+                showStatus('Fingerprint registered successfully. Now use Scan to claim.');
             } catch (error) {
-                console.error("DEBUG ERROR:", error);
-                alert("❌ Debug error: " + error.message);
+                console.error('registerBtn error:', error);
+                showStatus(error.message || 'Registration failed', true);
             } finally {
-                btn.innerText = originalText;
-                btn.disabled = false;
+                registerBtn.disabled = false;
             }
         });
 
-        // --- 2. SCAN FINGERPRINT BUTTON ---
         document.getElementById('scanBtn').addEventListener('click', async () => {
-            console.log("✅ SCAN BUTTON CLICKED!"); // <--- Check Console for this
-
-            const statusDiv = document.getElementById('status');
             const scanBtn = document.getElementById('scanBtn');
-
             scanBtn.disabled = true;
-            statusDiv.innerText = "Starting fingerprint scan...";
+            showStatus('Starting fingerprint scan...');
 
             try {
-                // Step A: Trigger the fingerprint scan
                 const resp = await fetch(`${API_BASE_URL}/login/start`, { method: 'POST' });
-                if (!resp.ok) {
-                    const errData = await resp.json();
-                    throw new Error(errData.error || "No registered users! Click the Debug button first.");
-                }
-                const options = await resp.json();
+                const options = await parseJsonResponse(resp);
+                if (!resp.ok) throw new Error(options.error || 'No registered users. Please register first.');
 
-                // This line triggers the phone's native popup
                 const authResp = await startAuthentication(options);
-
                 const verificationResp = await fetch(`${API_BASE_URL}/login/finish`, {
-                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(authResp),
                 });
-                const data = await verificationResp.json();
+                const data = await parseJsonResponse(verificationResp);
+                if (!verificationResp.ok) throw new Error(data.error || 'Authentication failed');
 
-                if (data.verified) {
-                    currentUserId = data.userID;
-                    statusDiv.innerText = "✅ Fingerprint verified! Claiming locker...";
-
-                    // Step B: Automatically claim the locker
-                    await claimLocker();
-                } else {
-                    statusDiv.innerText = "❌ Fingerprint not recognized. Try again.";
-                    scanBtn.disabled = false;
-                }
+                currentUserId = data.userID;
+                showStatus('Fingerprint verified! Claiming locker...');
+                await claimLocker();
             } catch (error) {
-                statusDiv.innerText = "❌ Error: " + (error.message || "Scan cancelled.");
+                console.error('scanBtn error:', error);
+                showStatus(error.message || 'Scan cancelled', true);
                 scanBtn.disabled = false;
             }
         });
 
-        // --- 3. CLAIM LOCKER ---
         async function claimLocker() {
-            const statusDiv = document.getElementById('status');
             const response = await fetch(`${API_BASE_URL}/claim`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ user_id: currentUserId })
+                body: JSON.stringify({ user_id: currentUserId }),
             });
-            const data = await response.json();
-
-            if (response.ok) {
-                currentLocker = data.locker_id;
-                document.getElementById('lockerIdDisplay').innerText = currentLocker;
-
-                document.getElementById('stepScan').classList.add('hidden');
-                document.getElementById('stepAssigned').classList.remove('hidden');
-                statusDiv.innerText = `✅ Locker ${currentLocker} assigned! (5 minutes to open)`;
-            } else {
-                statusDiv.innerText = `❌ Error claiming locker: ${data.error}`;
+            const data = await parseJsonResponse(response);
+            if (!response.ok) {
+                showStatus(data.error || 'Locker claim failed', true);
                 document.getElementById('scanBtn').disabled = false;
+                return;
             }
+            currentLocker = data.locker_id;
+            document.getElementById('lockerIdDisplay').innerText = currentLocker;
+            document.getElementById('stepScan').classList.add('hidden');
+            document.getElementById('stepAssigned').classList.remove('hidden');
+            showStatus(`Locker ${currentLocker} assigned!`);
         }
 
-        // --- 4. LOCKER ACTIONS ---
         async function sendAction(action) {
             const response = await fetch(`${API_BASE_URL}/action`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ user_id: currentUserId, locker_id: currentLocker, action: action })
+                body: JSON.stringify({ user_id: currentUserId, locker_id: currentLocker, action }),
             });
-            const data = await response.json();
-            document.getElementById('status').innerText = `✅ ${data.message}`;
+            const data = await parseJsonResponse(response);
+            if (!response.ok) {
+                showStatus(data.error || 'Action failed', true);
+                return;
+            }
+            showStatus(data.message);
         }
 
         document.getElementById('unlockBtn').addEventListener('click', () => sendAction('unlock'));
         document.getElementById('lockBtn').addEventListener('click', () => sendAction('lock'));
 
-        // --- 5. RELEASE LOCKER ---
         document.getElementById('releaseBtn').addEventListener('click', async () => {
             const response = await fetch(`${API_BASE_URL}/release`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ user_id: currentUserId, locker_id: currentLocker })
+                body: JSON.stringify({ user_id: currentUserId, locker_id: currentLocker }),
             });
-            const data = await response.json();
-
-            document.getElementById('status').innerText = `✅ ${data.message}`;
+            const data = await parseJsonResponse(response);
+            if (!response.ok) {
+                showStatus(data.error || 'Release failed', true);
+                return;
+            }
             document.getElementById('stepAssigned').classList.add('hidden');
             document.getElementById('stepScan').classList.remove('hidden');
-            document.getElementById('status').innerText = "Locker returned. Scan fingerprint to claim again.";
+            showStatus('Locker returned. Scan fingerprint to claim again.');
             document.getElementById('scanBtn').disabled = false;
             currentLocker = null;
             currentUserId = null;

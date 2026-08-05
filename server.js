@@ -1,10 +1,13 @@
 const express = require('express');
 const cors = require('cors');
 const mqtt = require('mqtt');
-const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
 const crypto = require('crypto');
+const dotenv = require('dotenv');
 const { generateRegistrationOptions, verifyRegistrationResponse, generateAuthenticationOptions, verifyAuthenticationResponse } = require('@simplewebauthn/server');
+
+dotenv.config();
+const db = require('./database');
 
 const app = express();
 app.use(cors());
@@ -12,35 +15,40 @@ app.use(express.json());
 app.use(express.static('public'));
 
 const isProduction = process.env.NODE_ENV === 'production';
-const publicUrl = process.env.RENDER_EXTERNAL_URL || 'http://localhost:3000';
-const rpID = isProduction ? new URL(publicUrl).hostname : 'localhost';
-const expectedOrigin = publicUrl;
+const expectedOrigin = process.env.EXPECTED_ORIGIN || process.env.RENDER_EXTERNAL_URL || 'http://localhost:3000';
+const rpID = process.env.RP_ID || new URL(expectedOrigin).hostname;
 
 console.log(`🔥 Running in ${isProduction ? 'Production' : 'Development'} mode`);
 console.log(`🔒 RP ID: ${rpID}`);
 console.log(`🌐 Expected Origin: ${expectedOrigin}`);
 
 // --- DATABASE ---
-const db = new sqlite3.Database(path.join(__dirname, 'lockers.db'));
-db.serialize(() => {
-    db.run("CREATE TABLE IF NOT EXISTS lockers (id INTEGER PRIMARY KEY, locker_id INTEGER, state TEXT, user_id TEXT)");
-    db.run("CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, credential_id TEXT, public_key TEXT, counter INTEGER)");
-    db.get("SELECT COUNT(*) as count FROM lockers", (err, row) => {
-        if (row.count === 0) {
-            db.run("INSERT INTO lockers (locker_id, state) VALUES (1, 'AVAILABLE'), (2, 'AVAILABLE')");
-        }
-    });
-});
+// Database initialization is handled in database.js
 
 // --- MQTT ---
+const mqttHost = process.env.MQTT_HOST || null;
 const config = {
-    mqtt_host: process.env.MQTT_HOST || 'mqtts://YOUR_CLUSTER.s1.eu.hivemq.cloud:8883',
-    mqtt_user: process.env.MQTT_USER || 'smart-locker',
-    mqtt_pass: process.env.MQTT_PASS || 'forwards',
-    mqtt_topic: 'esp32/lock/command'
+    mqtt_host: mqttHost,
+    mqtt_user: process.env.MQTT_USER || process.env.MQTT_USERNAME || null,
+    mqtt_pass: process.env.MQTT_PASS || process.env.MQTT_PASSWORD || null,
+    mqtt_topic: process.env.MQTT_TOPIC || 'esp32/lock/command'
 };
-const mqttClient = mqtt.connect(config.mqtt_host, { username: config.mqtt_user, password: config.mqtt_pass });
-mqttClient.on('connect', () => console.log('✅ MQTT Connected to HiveMQ'));
+let mqttClient = null;
+if (config.mqtt_host) {
+    const mqttUrl = /^[a-zA-Z]+:\/\//.test(config.mqtt_host)
+        ? config.mqtt_host
+        : `mqtts://${config.mqtt_host}`;
+
+    mqttClient = mqtt.connect(mqttUrl, {
+        username: config.mqtt_user,
+        password: config.mqtt_pass,
+        rejectUnauthorized: false,
+    });
+    mqttClient.on('connect', () => console.log('✅ MQTT Connected to HiveMQ'));
+    mqttClient.on('error', (err) => console.error('⚠️ MQTT connection error', err));
+} else {
+    console.warn('⚠️ MQTT is disabled because MQTT_HOST is not configured.');
+}
 
 const challengeStore = {};
 
@@ -48,11 +56,16 @@ const challengeStore = {};
 app.post('/register/start', (req, res) => {
     const userID = crypto.randomBytes(16).toString('hex');
     const options = generateRegistrationOptions({
-        rpID: rpID,
+        rpID,
         rpName: 'Smart Locker System',
-        userID: userID,
+        userID,
         userName: `user_${userID}`,
         attestationType: 'none',
+        authenticatorSelection: {
+            authenticatorAttachment: 'platform',
+            userVerification: 'required',
+        },
+        userVerification: 'required',
     });
     challengeStore[options.challenge] = userID;
     res.json(options);
@@ -81,12 +94,15 @@ app.post('/register/finish', async (req, res) => {
 
         if (verification && verification.verified && verification.registrationInfo) {
             const { credentialID, credentialPublicKey, counter } = verification.registrationInfo;
-            db.run("INSERT INTO users (id, credential_id, public_key, counter) VALUES (?, ?, ?, ?)",
+            return db.run("INSERT INTO users (id, credential_id, public_key, counter) VALUES (?, ?, ?, ?)",
                 [userID, credentialID.toString('base64url'), credentialPublicKey.toString('base64url'), counter], (dbErr) => {
-                    if (dbErr) console.error('register/finish: DB insert error', dbErr);
+                    if (dbErr) {
+                        console.error('register/finish: DB insert error', dbErr);
+                        return res.status(500).json({ error: 'Failed to save registration' });
+                    }
+                    delete challengeStore[body.challenge];
+                    return res.json({ verified: true, userID });
                 });
-            delete challengeStore[body.challenge];
-            return res.json({ verified: true, userID });
         } else {
             console.error('register/finish: verification failed or missing registrationInfo', { verification, body, userID });
         }
@@ -101,12 +117,16 @@ app.post('/register/finish', async (req, res) => {
 // --- 2. WEBAUTHN LOGIN ROUTES ---
 app.post('/login/start', (req, res) => {
     db.all("SELECT * FROM users", (err, rows) => {
-        if (rows.length === 0) return res.status(404).json({ error: 'No users registered' });
+        if (err) {
+            console.error('login/start DB error', err);
+            return res.status(500).json({ error: 'Database error' });
+        }
+        if (!rows || rows.length === 0) return res.status(404).json({ error: 'No users registered' });
         const options = generateAuthenticationOptions({
-            rpID: rpID,
+            rpID,
             allowCredentials: rows.map(u => ({ id: Buffer.from(u.credential_id, 'base64url'), type: 'public-key' })),
+            userVerification: 'required',
         });
-        // Ensure allowCredentials.id values are serialized as base64url strings
         if (options.allowCredentials && Array.isArray(options.allowCredentials)) {
             options.allowCredentials = options.allowCredentials.map(c => ({
                 id: Buffer.isBuffer(c.id) ? c.id.toString('base64url') : c.id,
@@ -162,27 +182,55 @@ app.post('/login/finish', async (req, res) => {
     });
 });
 
+app.get('/health', (req, res) => {
+    res.json({ status: 'ok', expectedOrigin, rpID, mqttConfigured: !!mqttClient });
+});
+
 // --- 3. LOCKER API ROUTES ---
+function publishMqtt(payload) {
+    if (!mqttClient) return;
+    mqttClient.publish(config.mqtt_topic, JSON.stringify(payload));
+}
+
 app.post('/claim', (req, res) => {
     const { user_id } = req.body;
     db.get("SELECT * FROM lockers WHERE state = 'AVAILABLE' LIMIT 1", (err, row) => {
+        if (err) {
+            console.error('claim DB error', err);
+            return res.status(500).json({ error: 'Database error' });
+        }
         if (!row) return res.status(400).json({ error: 'No lockers available' });
-        db.run("UPDATE lockers SET state = 'ASSIGNED', user_id = ? WHERE locker_id = ?", [user_id, row.locker_id]);
-        mqttClient.publish(config.mqtt_topic, JSON.stringify({ cmd: 'display', locker: row.locker_id, status: 'ASSIGNED', user: user_id }));
-        res.json({ message: 'Locker assigned', locker_id: row.locker_id });
+        const leaseExpiry = Math.floor(Date.now() / 1000) + 300;
+        db.run("UPDATE lockers SET state = 'ASSIGNED', user_id = ?, lease_expiry = ? WHERE locker_id = ?", [user_id, leaseExpiry, row.locker_id], (updateErr) => {
+            if (updateErr) {
+                console.error('claim update error', updateErr);
+                return res.status(500).json({ error: 'Failed to assign locker' });
+            }
+            publishMqtt({ cmd: 'display', locker: row.locker_id, status: 'ASSIGNED', user: user_id });
+            res.json({ message: 'Locker assigned', locker_id: row.locker_id });
+        });
     });
 });
 
 app.post('/action', (req, res) => {
     const { user_id, locker_id, action } = req.body;
     db.get("SELECT * FROM lockers WHERE locker_id = ? AND user_id = ?", [locker_id, user_id], (err, row) => {
+        if (err) {
+            console.error('action DB error', err);
+            return res.status(500).json({ error: 'Database error' });
+        }
         if (!row) return res.status(403).json({ error: 'Access denied' });
         if (action === 'unlock') {
-            db.run("UPDATE lockers SET state = 'OCCUPIED' WHERE locker_id = ?", [locker_id]);
-            mqttClient.publish(config.mqtt_topic, JSON.stringify({ cmd: 'unlock', locker: locker_id }));
-            return res.json({ message: 'Unlocking locker' });
+            db.run("UPDATE lockers SET state = 'OCCUPIED', occupied_since = ? WHERE locker_id = ?", [Math.floor(Date.now() / 1000), locker_id], (updateErr) => {
+                if (updateErr) {
+                    console.error('unlock DB error', updateErr);
+                    return res.status(500).json({ error: 'Failed to unlock locker' });
+                }
+                publishMqtt({ cmd: 'unlock', locker: locker_id });
+                return res.json({ message: 'Unlocking locker' });
+            });
         } else if (action === 'lock') {
-            mqttClient.publish(config.mqtt_topic, JSON.stringify({ cmd: 'lock', locker: locker_id }));
+            publishMqtt({ cmd: 'lock', locker: locker_id });
             return res.json({ message: 'Locking locker' });
         }
         res.status(400).json({ error: 'Invalid action' });
@@ -191,9 +239,14 @@ app.post('/action', (req, res) => {
 
 app.post('/release', (req, res) => {
     const { user_id, locker_id } = req.body;
-    db.run("UPDATE lockers SET state = 'AVAILABLE', user_id = NULL WHERE locker_id = ? AND user_id = ?", [locker_id, user_id]);
-    mqttClient.publish(config.mqtt_topic, JSON.stringify({ cmd: 'display', locker: locker_id, status: 'AVAILABLE', user: null }));
-    res.json({ message: 'Locker released' });
+    db.run("UPDATE lockers SET state = 'AVAILABLE', user_id = NULL, lease_expiry = NULL, occupied_since = NULL WHERE locker_id = ? AND user_id = ?", [locker_id, user_id], function (err) {
+        if (err) {
+            console.error('release DB error', err);
+            return res.status(500).json({ error: 'Database error' });
+        }
+        publishMqtt({ cmd: 'display', locker: locker_id, status: 'AVAILABLE', user: null });
+        res.json({ message: 'Locker released' });
+    });
 });
 
 // --- 4. TIMERS ---
