@@ -111,12 +111,12 @@
 <body>
     <div class="container">
         <h1>Smart Locker Control</h1>
-        <div id="status">Scan your fingerprint to claim a locker.</div>
+        <div id="status">Verify your identity to claim a locker.</div>
 
-        <!-- Step 1: Register or Scan Fingerprint -->
+        <!-- Step 1: Register or Verify Identity -->
         <div id="stepScan">
-            <button id="registerBtn">Register Fingerprint</button>
-            <button id="scanBtn">👆 Scan Fingerprint to Claim</button>
+            <button id="registerBtn">Set Up Biometric Login</button>
+            <button id="scanBtn">🔐 Verify Identity to Claim</button>
         </div>
 
         <!-- Step 2: Locker Controls (Automatically shown after successful scan) -->
@@ -129,7 +129,7 @@
             <button id="releaseBtn" style="background-color: #9E9E9E; color: white;">✅ I'm Done (Return)</button>
         </div>
 
-        <div class="sub-text">*Uses your phone's actual biometric scanner (WebAuthn).</div>
+        <div class="sub-text">*Uses your phone's Face ID, Touch ID, fingerprint, PIN, or pattern (WebAuthn).</div>
     </div>
 
     <script>
@@ -191,7 +191,7 @@
         document.getElementById('registerBtn').addEventListener('click', async () => {
             const registerBtn = document.getElementById('registerBtn');
             registerBtn.disabled = true;
-            showStatus('Starting fingerprint registration...');
+            showStatus('Starting biometric registration...');
 
             try {
                 const resp = await fetch(`${API_BASE_URL}/register/start`, { method: 'POST' });
@@ -214,7 +214,7 @@
                 const data = await parseJsonResponse(verificationResp);
                 if (!verificationResp.ok) throw new Error(data.error || 'Registration failed');
 
-                showStatus('Fingerprint registered successfully. Now use Scan to claim.');
+                showStatus('Biometric login set up successfully. Now verify to claim a locker.');
             } catch (error) {
                 console.error('registerBtn error:', error);
                 showStatus(error.message || 'Registration failed', true);
@@ -226,7 +226,7 @@
         document.getElementById('scanBtn').addEventListener('click', async () => {
             const scanBtn = document.getElementById('scanBtn');
             scanBtn.disabled = true;
-            showStatus('Starting fingerprint scan...');
+            showStatus('Verifying your identity...');
 
             try {
                 const resp = await fetch(`${API_BASE_URL}/login/start`, { method: 'POST' });
@@ -246,11 +246,11 @@
                 if (!verificationResp.ok) throw new Error(data.error || 'Authentication failed');
 
                 currentUserId = data.userID;
-                showStatus('Fingerprint verified! Claiming locker...');
+                showStatus('Identity verified! Claiming locker...');
                 await claimLocker();
             } catch (error) {
                 console.error('scanBtn error:', error);
-                showStatus(error.message || 'Scan cancelled', true);
+                showStatus(error.message || 'Verification cancelled', true);
                 scanBtn.disabled = false;
             }
         });
@@ -304,7 +304,7 @@
             }
             document.getElementById('stepAssigned').classList.add('hidden');
             document.getElementById('stepScan').classList.remove('hidden');
-            showStatus('Locker returned. Scan fingerprint to claim again.');
+            showStatus('Locker returned. Verify your identity to claim again.');
             document.getElementById('scanBtn').disabled = false;
             currentLocker = null;
             currentUserId = null;

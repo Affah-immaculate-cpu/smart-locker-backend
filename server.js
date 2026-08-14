@@ -302,7 +302,7 @@ app.post('/login/start', (req, res) => {
             const options = await generateAuthenticationOptions({
                 rpID,
                 allowCredentials: rows.map(u => ({
-                    id: Buffer.from(u.credential_id, 'base64url'),
+                    id: u.credential_id,
                     type: 'public-key',
                 })),
                 userVerification: 'required',
@@ -350,7 +350,7 @@ app.post('/login/finish', async (req, res) => {
                 expectedChallenge: challenge,
                 expectedRPID: String(rpID),
                 expectedOrigin: String(expectedOrigin),
-                authenticator: { credentialID: Buffer.from(row.credential_id, 'base64url'), credentialPublicKey: Buffer.from(row.public_key, 'base64url'), counter: row.counter },
+                credential: { id: row.credential_id, publicKey: Buffer.from(row.public_key, 'base64url'), counter: row.counter },
             });
 
             console.debug('login/finish verification', { verified: verification && verification.verified, authenticationInfo: verification && verification.authenticationInfo });
@@ -418,6 +418,7 @@ app.post('/action', (req, res) => {
                 publishMqtt({ cmd: 'unlock', locker: locker_id });
                 return res.json({ message: 'Unlocking locker' });
             });
+            return;
         } else if (action === 'lock') {
             publishMqtt({ cmd: 'lock', locker: locker_id });
             return res.json({ message: 'Locking locker' });
@@ -452,8 +453,8 @@ setInterval(() => {
             if (mqttClient) mqttClient.publish(config.mqtt_topic, JSON.stringify({ cmd: 'display', locker: row.locker_id, status: 'AVAILABLE', user: null }));
         });
     });
-    const twentyFourHoursAgo = now - (60 * 60 * 24);
-    db.all("SELECT * FROM lockers WHERE state = 'OCCUPIED' AND occupied_since < ?", [twentyFourHoursAgo], (err, rows) => {
+    const occupiedTimeoutThreshold = now - 300; // 5 minutes
+    db.all("SELECT * FROM lockers WHERE state = 'OCCUPIED' AND occupied_since < ?", [occupiedTimeoutThreshold], (err, rows) => {
         if (err) {
             console.error('timer: error querying occupied lockers', err);
             return;
