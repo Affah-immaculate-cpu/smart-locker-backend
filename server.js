@@ -28,9 +28,9 @@ if (!rpID) {
     }
 }
 
-console.log(`🔥 Running in ${isProduction ? 'Production' : 'Development'} mode`);
-console.log(`🔒 RP ID: ${rpID}`);
-console.log(`🌐 Expected Origin: ${expectedOrigin}`);
+console.log(`Running in ${isProduction ? 'Production' : 'Development'} mode`);
+console.log(`RP ID: ${rpID}`);
+console.log(`Expected Origin: ${expectedOrigin}`);
 
 // --- DATABASE ---
 // Database initialization is handled in database.js
@@ -54,10 +54,10 @@ if (config.mqtt_host) {
         password: config.mqtt_pass,
         rejectUnauthorized: false,
     });
-    mqttClient.on('connect', () => console.log('✅ MQTT Connected to HiveMQ'));
-    mqttClient.on('error', (err) => console.error('⚠️ MQTT connection error', err));
+    mqttClient.on('connect', () => console.log('MQTT Connected to HiveMQ'));
+    mqttClient.on('error', (err) => console.error('MQTT connection error', err));
 } else {
-    console.warn('⚠️ MQTT is disabled because MQTT_HOST is not configured.');
+    console.warn('MQTT is disabled because MQTT_HOST is not configured.');
 }
 
 const challengeStore = {};

@@ -116,17 +116,17 @@
         <!-- Step 1: Register or Verify Identity -->
         <div id="stepScan">
             <button id="registerBtn">Set Up Biometric Login</button>
-            <button id="scanBtn">🔐 Verify Identity to Claim</button>
+            <button id="scanBtn">Verify Identity to Claim</button>
         </div>
 
         <!-- Step 2: Locker Controls (Automatically shown after successful scan) -->
         <div id="stepAssigned" class="hidden">
             <p>You are assigned to <strong>Locker <span id="lockerIdDisplay" style="color:#2196F3;">-</span></strong>
             </p>
-            <button id="unlockBtn">🔓 Open</button>
-            <button id="lockBtn">🔒 Close</button>
+            <button id="unlockBtn">Open</button>
+            <button id="lockBtn">Close</button>
             <br><br>
-            <button id="releaseBtn" style="background-color: #9E9E9E; color: white;">✅ I'm Done (Return)</button>
+            <button id="releaseBtn" style="background-color: #9E9E9E; color: white;">I'm Done (Return)</button>
         </div>
 
         <div class="sub-text">*Uses your phone's Face ID, Touch ID, fingerprint, PIN, or pattern (WebAuthn).</div>
@@ -141,7 +141,7 @@
 
         function showStatus(message, isError = false) {
             const statusDiv = document.getElementById('status');
-            statusDiv.innerText = `${isError ? '❌ ' : '✅ '} ${message}`;
+            statusDiv.innerText = String(message).replace(/\s*See:\s*https?:\/\/\S+\s*$/i, '');
         }
 
         async function parseJsonResponse(response) {
@@ -217,7 +217,10 @@
                 showStatus('Biometric login set up successfully. Now verify to claim a locker.');
             } catch (error) {
                 console.error('registerBtn error:', error);
-                showStatus(error.message || 'Registration failed', true);
+                const message = error.name === 'NotAllowedError'
+                    ? 'Cancelled registering.'
+                    : (error.message || 'Registration failed');
+                showStatus(message, true);
             } finally {
                 registerBtn.disabled = false;
             }
@@ -250,7 +253,10 @@
                 await claimLocker();
             } catch (error) {
                 console.error('scanBtn error:', error);
-                showStatus(error.message || 'Verification cancelled', true);
+                const message = error.name === 'NotAllowedError'
+                    ? 'Cancelled claiming locker.'
+                    : (error.message || 'Verification cancelled');
+                showStatus(message, true);
                 scanBtn.disabled = false;
             }
         });
