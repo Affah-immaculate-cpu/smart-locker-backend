@@ -139,6 +139,52 @@
         let currentUserId = null;
         let currentLocker = null;
 
+        function saveSession() {
+            if (currentUserId && currentLocker) {
+                localStorage.setItem('locker_session', JSON.stringify({ userId: currentUserId, lockerId: currentLocker }));
+            } else {
+                localStorage.removeItem('locker_session');
+            }
+        }
+
+        function showAssignedStep() {
+            document.getElementById('lockerIdDisplay').innerText = currentLocker;
+            document.getElementById('stepScan').classList.add('hidden');
+            document.getElementById('stepAssigned').classList.remove('hidden');
+        }
+
+        async function restoreSession() {
+            const saved = localStorage.getItem('locker_session');
+            if (!saved) return;
+
+            let session;
+            try {
+                session = JSON.parse(saved);
+            } catch (error) {
+                localStorage.removeItem('locker_session');
+                return;
+            }
+            if (!session || !session.userId || !session.lockerId) {
+                localStorage.removeItem('locker_session');
+                return;
+            }
+
+            try {
+                const response = await fetch(`${API_BASE_URL}/locker/status?user_id=${encodeURIComponent(session.userId)}`);
+                const data = await parseJsonResponse(response);
+                if (response.ok && data.locker_id) {
+                    currentUserId = session.userId;
+                    currentLocker = data.locker_id;
+                    showAssignedStep();
+                    showStatus(`Locker ${currentLocker} assigned!`);
+                } else {
+                    localStorage.removeItem('locker_session');
+                }
+            } catch (error) {
+                console.error('restoreSession error:', error);
+            }
+        }
+
         function showStatus(message, isError = false) {
             const statusDiv = document.getElementById('status');
             statusDiv.innerText = String(message).replace(/\s*See:\s*https?:\/\/\S+\s*$/i, '');
@@ -274,9 +320,8 @@
                 return;
             }
             currentLocker = data.locker_id;
-            document.getElementById('lockerIdDisplay').innerText = currentLocker;
-            document.getElementById('stepScan').classList.add('hidden');
-            document.getElementById('stepAssigned').classList.remove('hidden');
+            saveSession();
+            showAssignedStep();
             showStatus(`Locker ${currentLocker} assigned!`);
         }
 
@@ -314,7 +359,10 @@
             document.getElementById('scanBtn').disabled = false;
             currentLocker = null;
             currentUserId = null;
+            saveSession();
         });
+
+        restoreSession();
     </script>
 </body>
 

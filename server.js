@@ -401,6 +401,19 @@ app.post('/claim', (req, res) => {
     });
 });
 
+app.get('/locker/status', (req, res) => {
+    const { user_id } = req.query;
+    if (!user_id) return res.status(400).json({ error: 'Missing user_id' });
+    db.get("SELECT * FROM lockers WHERE user_id = ? AND state IN ('ASSIGNED', 'OCCUPIED')", [user_id], (err, row) => {
+        if (err) {
+            console.error('locker status DB error', err);
+            return res.status(500).json({ error: 'Database error' });
+        }
+        if (!row) return res.json({ locker_id: null });
+        res.json({ locker_id: row.locker_id, state: row.state });
+    });
+});
+
 app.post('/action', (req, res) => {
     const { user_id, locker_id, action } = req.body;
     db.get("SELECT * FROM lockers WHERE locker_id = ? AND user_id = ?", [locker_id, user_id], (err, row) => {
