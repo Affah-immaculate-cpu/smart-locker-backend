@@ -1,10 +1,10 @@
 # Smart Locker Backend
 
-A biometric-secured smart locker system. Users verify their identity with WebAuthn (Face ID / Touch ID / fingerprint / PIN) in the browser, the Node/Express backend assigns them an available locker, and locker hardware (ESP32 + relay-driven solenoid locks + I2C LCD) is controlled over MQTT.
+A biometric-secured smart locker system. Users verify their identity with WebAuthn (Face ID / Touch ID / fingerprint / PIN) in the browser, the Node backend assigns them an available locker, and locker hardware (ESP32 + relay-driven solenoid locks + I2C LCD) is controlled over MQTT.
 
 ## How it works
 
-1. A user opens the web page ([public/index.html](public/index.html)) and registers a biometric credential (WebAuthn) or verifies with one they already registered.
+1. A user opens the web page (smart-locker-backend-o5ha.onrender.com) and registers a biometric credential (WebAuthn) or verifies with one they already registered.
 2. On successful verification, the backend claims the next `AVAILABLE` locker for that user and publishes an MQTT `display` command so the locker's LCD shows who it's assigned to.
 3. The user can `unlock`/`lock` their locker from the page; each action is published as an MQTT command that the ESP32 firmware picks up and drives the relay accordingly.
 4. When done, the user releases the locker, freeing it for the next person.
@@ -14,7 +14,7 @@ A biometric-secured smart locker system. Users verify their identity with WebAut
 ## Architecture
 
 ```
-Browser (public/index.html)
+Browser (smart-locker-backend-o5ha.onrender.com)
    |  WebAuthn (register/login) + REST (claim/action/release)
    v
 Express server (server.js) -- SQLite (lockers.db via database.js)
