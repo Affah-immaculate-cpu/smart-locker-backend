@@ -4,7 +4,7 @@ A biometric-secured smart locker system. Users verify their identity with WebAut
 
 ## How it works
 
-1. A user opens the web page (smart-locker-backend-o5ha.onrender.com) and registers a biometric credential (WebAuthn) or verifies with one they already registered.
+1. A user opens the web page [Smart Locker Login Page](smart-locker-backend-o5ha.onrender.com) and registers a biometric credential (WebAuthn) or verifies with one they already registered.
 2. On successful verification, the backend claims the next `AVAILABLE` locker for that user and publishes an MQTT `display` command so the locker's LCD shows who it's assigned to.
 3. The user can `unlock`/`lock` their locker from the page; each action is published as an MQTT command that the ESP32 firmware picks up and drives the relay accordingly.
 4. When done, the user releases the locker, freeing it for the next person.
@@ -12,7 +12,6 @@ A biometric-secured smart locker system. Users verify their identity with WebAut
 6. If the page is refreshed while a locker is claimed, the session is restored from `localStorage` and re-validated against the server so the user doesn't lose their spot.
 
 ## Architecture
-## Watch operating video: https://drive.google.com/file/d/1R2BMD9DogCVqviRVV4EwPOxApFnTIgfG/view?usp=sharing
 
 ```
 Browser (smart-locker-backend-o5ha.onrender.com)
@@ -115,3 +114,7 @@ Required Arduino libraries: `PubSubClient`, `ArduinoJson`, `LiquidCrystal_I2C`. 
 
 - `.env` is gitignored — never commit real broker credentials.
 - `lockers.db` is a local SQLite file; delete it to reset all lockers/users during development.
+
+## Read Operating Manual: [Open Manual](Smart%20Locker%20-%20Operations%20Manual.pdf)
+## Watch operating video: [Smart Locker - Demo Video](https://drive.google.com/file/d/1R2BMD9DogCVqviRVV4EwPOxApFnTIgfG/view?usp=sharing)
+
