@@ -12,6 +12,7 @@ A biometric-secured smart locker system. Users verify their identity with WebAut
 6. If the page is refreshed while a locker is claimed, the session is restored from `localStorage` and re-validated against the server so the user doesn't lose their spot.
 
 ## Architecture
+## Watch operating video: https://drive.google.com/file/d/1R2BMD9DogCVqviRVV4EwPOxApFnTIgfG/view?usp=sharing
 
 ```
 Browser (smart-locker-backend-o5ha.onrender.com)
